@@ -1,0 +1,23 @@
+import { cookies } from 'next/headers';
+export class AppError extends Error { constructor(message:string,public status=500){super(message);} }
+export function reply(data:unknown,status=200){return Response.json(data,{status,headers:{'Cache-Control':'private, no-store'}});}
+export function failure(e:unknown){if(e instanceof AppError)return reply({error:e.message},e.status);console.error('AirDesk request failed:',e instanceof Error?e.message:'Unknown error');return reply({error:'Unable to complete this request. Please try again.'},500);}
+export function origin(request:Request){const value=request.headers.get('origin');let from:URL;try{from=new URL(value||'');}catch{throw new AppError('Please use this workspace to submit the request.',403);}const host=request.headers.get('host')||new URL(request.url).host;if(!['https:','http:'].includes(from.protocol)||from.host!==host)throw new AppError('Please use this workspace to submit the request.',403);}
+export function config(){const url=process.env.SUPABASE_URL?.replace(/\/$/,''),key=process.env.SUPABASE_SERVICE_ROLE_KEY,publicKey=process.env.SUPABASE_ANON_KEY,owner=process.env.AIRDESK_OWNER_EMAIL?.trim().toLowerCase();if(!url||!key||!publicKey||!owner)throw new AppError('Workspace setup is not complete. Please contact the owner.',503);return {url,key,publicKey,owner};}
+export async function supa<T=unknown>(path:string,options:RequestInit={}):Promise<T>{const {url,key}=config();const response=await fetch(url+path,{...options,cache:'no-store',headers:{apikey:key,Authorization:`Bearer ${key}`,'Content-Type':'application/json',...options.headers}});if(!response.ok){console.error('Supabase request failed:',path.split('?')[0],response.status);throw new AppError('Could not save or load the workspace. Check the connection and try again.',502);}const body=await response.text();return (body?JSON.parse(body):null) as T;}
+type AuthUser={id:string;email?:string;email_confirmed_at?:string};
+type AuthSession={access_token:string;refresh_token:string;expires_in:number;user:AuthUser};
+export async function authFetch(path:string,options:RequestInit={}){const {url,publicKey}=config();return fetch(url+'/auth/v1'+path,{...options,cache:'no-store',headers:{apikey:publicKey,'Content-Type':'application/json',...options.headers}});}
+export async function setSession(session:AuthSession){const jar=await cookies();const options={httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax' as const,path:'/',maxAge:60*60*24*30};jar.set('airdesk-access',session.access_token,options);jar.set('airdesk-refresh',session.refresh_token,options);}
+export async function clearSession(){const jar=await cookies();jar.delete('airdesk-access');jar.delete('airdesk-refresh');}
+export async function requireOwner(){const {owner}=config(),jar=await cookies();let access=jar.get('airdesk-access')?.value;const refresh=jar.get('airdesk-refresh')?.value;let user:AuthUser|undefined;
+ if(access){const r=await authFetch('/user',{headers:{Authorization:`Bearer ${access}`}});if(r.ok)user=await r.json();else if(r.status>=500)throw new AppError('Sign-in service is unavailable. Please try again.',503);}
+ if(!user&&refresh){const r=await authFetch('/token?grant_type=refresh_token',{method:'POST',body:JSON.stringify({refresh_token:refresh})});if(r.ok){const session=await r.json() as AuthSession;user=session.user;if(user?.email?.toLowerCase()===owner&&user.email_confirmed_at){await setSession(session);access=session.access_token;}}else if(r.status>=500)throw new AppError('Sign-in service is unavailable. Please try again.',503);}
+ if(!user)throw new AppError('Your session has expired. Sign in again to continue.',401);
+ if(user.email?.toLowerCase()!==owner||!user.email_confirmed_at)throw new AppError('This account does not have access to this workspace.',403);return {user,access};
+}
+export async function jsonBody(request:Request){try{return await request.json();}catch{throw new AppError('Invalid request. Please try again.',400);}}
+export async function rows<T>(table:string){const result:T[]=[];for(let offset=0;;offset+=500){const page=await supa<T[]>(`/rest/v1/${table}${table.includes('?')?'&':'?'}limit=500&offset=${offset}`);result.push(...page);if(page.length<500)return result;}}
+export const BUCKET='airdesk-files';
+export type AssetRow={id:string;job_id:string;name:string;mime:string;kind:'photo'|'file';size:number;state:'pending'|'ready'};
+export async function assetById(id:string){const result=await supa<AssetRow[]>(`/rest/v1/airdesk_assets?id=eq.${id}&select=*`);if(!result[0])throw new AppError('File not found.',404);return result[0];}

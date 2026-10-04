@@ -1,0 +1,5 @@
+import {z} from 'zod';
+import {requireOwner,supa,reply,failure,origin,AppError,jsonBody} from '@/lib/server';
+export const runtime='nodejs';export const dynamic='force-dynamic';
+const schema=z.object({id:z.string().uuid().optional(),customer_id:z.string().uuid().optional(),name:z.string().trim().min(1).max(150),phone:z.string().trim().max(60),email:z.union([z.string().email().max(200),z.literal('')]),address:z.string().trim().min(1).max(500),type:z.enum(['Installation','Service','Repair','Maintenance','Other']),status:z.enum(['Quote','In Progress','Completed']),title:z.string().trim().min(1).max(180),notes:z.string().max(10000),scheduled_at:z.string().datetime().nullable(),duration:z.number().int().min(15).max(1440)});
+export async function POST(request:Request){try{origin(request);await requireOwner();const parsed=schema.safeParse(await jsonBody(request));if(!parsed.success)throw new AppError('Please check the customer details, job title and schedule.',400);const id=await supa<string>('/rest/v1/rpc/airdesk_save_job',{method:'POST',body:JSON.stringify({payload:parsed.data})});return reply({id});}catch(e){return failure(e);}}
