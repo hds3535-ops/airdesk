@@ -1,10 +1,27 @@
 import { cookies } from 'next/headers';
+import {workspaceError,serverKeyHeaders} from './supabase-errors';
 export class AppError extends Error { constructor(message:string,public status=500){super(message);} }
 export function reply(data:unknown,status=200){return Response.json(data,{status,headers:{'Cache-Control':'private, no-store'}});}
 export function failure(e:unknown){if(e instanceof AppError)return reply({error:e.message},e.status);console.error('AirDesk request failed:',e instanceof Error?e.message:'Unknown error');return reply({error:'Unable to complete this request. Please try again.'},500);}
 export function origin(request:Request){const value=request.headers.get('origin');let from:URL;try{from=new URL(value||'');}catch{throw new AppError('Please use this workspace to submit the request.',403);}const host=request.headers.get('host')||new URL(request.url).host;if(!['https:','http:'].includes(from.protocol)||from.host!==host)throw new AppError('Please use this workspace to submit the request.',403);}
-export function config(){const url=process.env.SUPABASE_URL?.replace(/\/$/,''),key=process.env.SUPABASE_SERVICE_ROLE_KEY,publicKey=process.env.SUPABASE_ANON_KEY,owner=process.env.AIRDESK_OWNER_EMAIL?.trim().toLowerCase();if(!url||!key||!publicKey||!owner)throw new AppError('Workspace setup is not complete. Please contact the owner.',503);return {url,key,publicKey,owner};}
-export async function supa<T=unknown>(path:string,options:RequestInit={}):Promise<T>{const {url,key}=config();const response=await fetch(url+path,{...options,cache:'no-store',headers:{apikey:key,Authorization:`Bearer ${key}`,'Content-Type':'application/json',...options.headers}});if(!response.ok){console.error('Supabase request failed:',path.split('?')[0],response.status);throw new AppError('Could not save or load the workspace. Check the connection and try again.',502);}const body=await response.text();return (body?JSON.parse(body):null) as T;}
+export function config(){
+ const rawUrl=process.env.SUPABASE_URL?.trim(),key=process.env.SUPABASE_SERVICE_ROLE_KEY?.trim(),publicKey=process.env.SUPABASE_ANON_KEY?.trim(),owner=process.env.AIRDESK_OWNER_EMAIL?.trim().toLowerCase();
+ if(!rawUrl||!key||!publicKey||!owner)throw new AppError('Workspace setup is not complete. Set all four AirDesk environment variables in Vercel and redeploy. [CONFIG_MISSING]',503);
+ let parsed:URL;try{parsed=new URL(rawUrl);}catch{throw new AppError('SUPABASE_URL must be the project URL, such as https://project-id.supabase.co. [CONFIG_URL]',503);}
+ if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.search||parsed.hash||!['','/'].includes(parsed.pathname))throw new AppError('SUPABASE_URL must be the project URL without /rest/v1, /auth/v1 or a dashboard path. [CONFIG_URL]',503);
+ if(key.startsWith('sb_publishable_')||key===publicKey)throw new AppError('SUPABASE_SERVICE_ROLE_KEY contains a public key. Use the project secret key or legacy service_role key, then redeploy. [CONFIG_SERVER_KEY]',503);
+ if(publicKey.startsWith('sb_secret_'))throw new AppError('SUPABASE_ANON_KEY needs a publishable or legacy anon key, not a secret key. [CONFIG_PUBLIC_KEY]',503);
+ for(const [value,expected] of [[key,'service_role'],[publicKey,'anon']]){
+  if(value.startsWith('eyJ')&&value.split('.').length===3){let role:unknown;try{role=JSON.parse(Buffer.from(value.split('.')[1],'base64url').toString()).role;}catch{}if(role&&role!==expected)throw new AppError(`The ${expected==='anon'?'SUPABASE_ANON_KEY':'SUPABASE_SERVICE_ROLE_KEY'} key has the wrong role. Check the Supabase API Keys page. [CONFIG_KEY_ROLE]`,503);}
+ }
+ return {url:parsed.origin,key,publicKey,owner};
+}
+export async function supa<T=unknown>(path:string,options:RequestInit={}):Promise<T>{
+ const {url,key}=config();const headers=serverKeyHeaders(key);new Headers(options.headers).forEach((value,name)=>headers.set(name,value));
+ let response:Response;try{response=await fetch(url+path,{...options,cache:'no-store',headers});}catch{throw new AppError('Could not reach Supabase. Check SUPABASE_URL and whether the project is active. [SUPABASE_NETWORK]',502);}
+ const body=await response.text();let data:unknown=null;try{data=body?JSON.parse(body):null;}catch{if(response.ok)throw new AppError('Supabase returned an unexpected response. Check the project URL. [SUPABASE_RESPONSE]',502);}
+ if(!response.ok){const message=workspaceError(response.status,data,path);console.error('AirDesk Supabase error',response.status,message);throw new AppError(message,502);}return data as T;
+}
 type AuthUser={id:string;email?:string;email_confirmed_at?:string};
 type AuthSession={access_token:string;refresh_token:string;expires_in:number;user:AuthUser};
 export async function authFetch(path:string,options:RequestInit={}){const {url,publicKey}=config();return fetch(url+'/auth/v1'+path,{...options,cache:'no-store',headers:{apikey:publicKey,'Content-Type':'application/json',...options.headers}});}
