@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import Fonts from "./fonts";
 
 export const metadata: Metadata = {
   title: "AirDesk · Job management",
@@ -17,7 +18,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="antialiased">{children}</body>
+      <body className="antialiased"><Fonts/>{children}</body>
     </html>
   );
 }
